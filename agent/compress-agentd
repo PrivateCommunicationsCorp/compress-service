@@ -1,0 +1,52 @@
+#! /bin/sh
+#
+# compress-agentd   Startup script for the HTTP compress statistic agent
+#
+# Version:      @(#)compress-agentd  1.00  14-Jul-2015  dmytro.vasylenko@globallogic.com
+#
+### BEGIN INIT INFO
+# Provides:          compress-agentd
+# Required-Start:    $network $syslog
+# Required-Stop:     $network $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: compress-agentd
+### END INIT INFO
+ 
+NAME=stat-agent
+SCRIPT_NAME=$(basename $0)
+DAEMON=/usr/bin/stat-agent.py
+PIDFILE=/var/run/$NAME.pid
+SQUID_ARGS="-YC"
+
+. /lib/lsb/init-functions
+ 
+PATH=/bin:/usr/bin:/sbin:/usr/sbin
+ 
+case "$1" in
+        start)
+                log_daemon_msg "Starting compress agent daemon" "$SCRIPT_NAME"
+                ${DAEMON} start
+                log_end_msg $?
+                ;;
+        stop)
+                log_daemon_msg "Stopping compress agent daemon" "$SCRIPT_NAME"
+                ${DAEMON} stop
+                log_end_msg $?
+                ;;
+        restart)
+                log_daemon_msg "Restarting compress agent daemon" "$SCRIPT_NAME"
+                ${DAEMON} stop || log_daemon_msg "Daemon wasn't started" "$SCRIPT_NAME"
+                ${DAEMON} start
+                log_end_msg $?
+                ;;
+        status)
+                [ -f $PIDFILE ] && ps ax | grep -v grep | grep $(cat $PIDFILE) | grep -q $(basename ${DAEMON}) && log_daemon_msg "$SCRIPT_NAME is running" "." || log_daemon_msg "$SCRIPT_NAME is stopped" "."
+                ;;
+        *)
+                log_daemon_msg "Usage: /etc/init.d/$NAME {start|stop|restart|status}" "$SCRIPT_NAME"
+                exit 3
+                ;;
+esac
+ 
+exit 0
