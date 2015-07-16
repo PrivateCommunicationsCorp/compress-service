@@ -3,6 +3,7 @@
 import socket
 import os
 import sys
+import multiprocessing
 import argparse
 import signal
 import logging
@@ -11,19 +12,41 @@ import fileinput
 import pymongo
 # from bson.objectid import ObjectId
 
-redis_exists = False
-try:
-    import redis
-    redis_exists = True
-except ImportError:
-    pass
-
 using_daemon = False
 try:
     from daemon import runner
     using_daemon = True
 except ImportError:
     pass
+
+
+class SysLogger(object):
+
+    def __init__(self, logger = None, logtag = 'compress_agent', log2tty = True):
+        self.__log = logger or logging.getLogger(logtag)
+        self.__log.setLevel(logging.INFO)
+        # str_format = '%(name)s: %(message)s'
+        # logging.Formatter(str_format)
+        # metalog workaround here
+        formatter = logging.Formatter('%(asctime)s %(name)s: %(levelname)s %(message)s', '%b %e %H:%M:%S')
+        slh = logging.handlers.SysLogHandler(address = '/dev/log') # facility = SysLogHandler.LOG_DAEMON
+        slh.setFormatter(formatter)
+        slh.setLevel(logging.INFO)
+        self.__log.addHandler(slh)
+        # self.__log_handlers = [slh.socket.fileno(),]
+
+        if log2tty == True:
+            hterminal = logging.StreamHandler(sys.stdout)
+            hterminal.setLevel(logging.INFO)
+            # date_format = '%m/%d/%Y %H:%M:%S'
+            str_format = '%(asctime)s (%(levelname)s) %(name)s: %(message)s'
+            formatter = logging.Formatter(str_format) #, date_format)
+            hterminal.setFormatter(formatter)
+            self.__log.addHandler(hterminal)
+            # self.__log_handlers = self.__log_handlers + [hterminal,]
+
+    def getLogger(self):
+        return self.__log
 
 
 
@@ -274,51 +297,51 @@ class StatServer(object):
   module_name = os.path.splitext(os.path.basename(sys.argv[0]))[0]
   log_dir = '/tmp'
   pid_dir = '/var/run'
-  log2tty = True
-  logtag = 'compress_agent'
   description = 'Daemon updates MongoDb with HTTP compression statistic'
-
+  log2tty = True
 
   def __init__(self, cmd = Cmd.start):
-      self.busrstq = []
-      if using_daemon:
-          self.stdin_path = '/dev/null'
-          self.stdout_path = os.path.join(StatServer.log_dir, '%s.stdout' % StatServer.module_name)
-          self.stderr_path = os.path.join(StatServer.log_dir, '%s.stderr' % StatServer.module_name)
-          self.pidfile_path = os.path.join(StatServer.pid_dir, '%s.pid' % StatServer.module_name)
-          self.pidfile_timeout = 5
-          self.log_init()
-          #if cmd and cmd not in [Cmd.start, Cmd.restart]:
-          #return
+    self.results = {}
+    if using_daemon:
+        self.stdin_path = '/dev/null'
+        self.stdout_path = os.path.join(StatServer.log_dir, '%s.stdout' % StatServer.module_name)
+        self.stderr_path = os.path.join(StatServer.log_dir, '%s.stderr' % StatServer.module_name)
+        self.pidfile_path = os.path.join(StatServer.pid_dir, '%s.pid' % StatServer.module_name)
+        self.pidfile_timeout = 5
+    self.__logger = SysLogger(log2tty = StatServer.log2tty)
+    self.log = self.__logger.getLogger()
+    if cmd and cmd not in [Cmd.start, Cmd.restart]:
+        return
+    self.__pool = None
+    # multiprocessing.Pool(processes = multiprocessing.cpu_count(),
+    #                                   initializer = StatServer.worker_init)
+                                       # initializer = lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+                                         # initializer = lambda: SysLogger().getLogger().info(
+                                         #     'Starting %s' % multiprocessing.current_process().name))
+    # self.log.info('')
+
+
+  @staticmethod
+  def worker_init():
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    SysLogger().getLogger().info('Starting %s' % multiprocessing.current_process().name)
 
 
   def __del__(self):
-    self.log.info('Stopped')
-
-
-  def log_init(self):
-    self.log = logging.getLogger(StatServer.logtag)
-    self.log.setLevel(logging.INFO)
-    # str_format = '%(name)s: %(message)s'
-    # logging.Formatter(str_format)
-    # metalog workaround here
-    formatter = logging.Formatter('%(asctime)s %(name)s: %(levelname)s %(message)s', '%b %e %H:%M:%S')
-    slh = logging.handlers.SysLogHandler(address = '/dev/log') # facility = SysLogHandler.LOG_DAEMON
-    slh.setFormatter(formatter)
-    slh.setLevel(logging.INFO)
-    self.log.addHandler(slh)
-    self.log_handlers = [slh.socket.fileno(),]
-
-    # Debug purpose only (log to stdout)
-    if StatServer.log2tty == True:
-      hterminal = logging.StreamHandler(sys.stdout)
-      hterminal.setLevel(logging.INFO)
-      # date_format = '%m/%d/%Y %H:%M:%S'
-      str_format = '%(asctime)s (%(levelname)s) %(name)s: %(message)s'
-      formatter = logging.Formatter(str_format) #, date_format)
-      hterminal.setFormatter(formatter)
-      self.log.addHandler(hterminal)
-      self.log_handlers = self.log_handlers + [hterminal,]
+    try:
+        self.__pool.terminate()
+        self.__pool.join()
+        for name in self.results.keys():
+            if self.results[name].ready():
+                if not self.results[name].get():
+                    try:
+                        os.remove(name)
+                    except OSError as e:
+                        self.log.error('Fail to remove storage file %s: %s' % (name, e))
+                del self.results[name]
+        self.log.info('Stopped')
+    except:
+        pass
 
 
   def run(self):
@@ -338,29 +361,23 @@ class StatServer(object):
                     stat_burst = self.sock.read()
                     self.log.info('Got data file: "%s"' % stat_burst)
                     ###
-                    for name, processed in self.busrstq[:]:
-                        i = self.busrstq.index((name, processed))
-                        if not processed:
-                            storage = Storage(name, self.log)
-                            if not storage.process():
-                                continue
-                        try:
-                            os.remove(name)
-                            del self.busrstq[i]
-                        except OSError as e:
-                            self.log.error('Fail to remove storage file %s: %s' % (name, e))
-                            if not processed:
-                                self.busrstq[i] = (name, True)
+                    try:
+                        for name in self.results.keys():
+                            if self.results[name].ready():
+                                if not self.results[name].get():
+                                    try:
+                                        os.remove(name)
+                                    except OSError as e:
+                                        self.log.error('Fail to remove storage file %s: %s' % (name, e))
+                                else:
+                                    del self.results[name]
+                    except:
+                        pass
                     ###
-                    storage = Storage(stat_burst, self.log)
-                    if storage.process():
-                        try:
-                            os.remove(stat_burst)
-                        except OSError as e:
-                            self.log.error('Fail to remove storage file %s: %s' % (stat_burst, e))
-                            self.busrstq.append((stat_burst, True))
-                    else:
-                        self.busrstq.append((stat_burst, False))
+                    if not self.__pool:
+                        self.__pool = multiprocessing.Pool(processes = multiprocessing.cpu_count(),
+                                                           initializer = StatServer.worker_init)
+                    self.results[stat_burst] = self.__pool.apply_async(worker, (stat_burst,))
 
             except (KeyboardInterrupt, SystemExit):
                 raise KeyboardInterrupt
@@ -383,6 +400,21 @@ class StatServer(object):
     self.log.info('Canceled')
     sys.exit(0)
 
+
+
+def worker(stat_burst):
+    try:
+        log = SysLogger()
+        storage = Storage(stat_burst, log.getLogger())
+        if storage.process():
+            try:
+                os.remove(stat_burst)
+            except OSError as e:
+                log.getLogger().error('Fail to remove storage file %s: %s' % (stat_burst, e))
+                return False
+    except:
+        return False
+    return True
 
 
 

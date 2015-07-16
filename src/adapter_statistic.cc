@@ -931,10 +931,10 @@ void compress::Service::setOne(const libecap::Name &name, const libecap::Area &v
     const std::string value = valArea.toString();
     if(name == "mongodb_delay") {
         if(!setDataBurstDelay(value)) {
-                log.err() << "'mongodb_delay' parameter is not a valid number of seconds"
+                log.err() << "'mongodb_delay' parameter is not a valid number of minutes"
                           << ", default(" << default_burst_step << ") used instead"<< std::endl;
         } else {
-            log.info() << "New 'mongodb_delay' parameter used: " << value << " seconds" << std::endl;
+            log.info() << "New 'mongodb_delay' parameter used: " << value << " minutes" << std::endl;
         }
     } else {
         // throw libecap::TextException(CfgErrorPrefix +
