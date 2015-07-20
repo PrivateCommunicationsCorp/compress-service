@@ -21,9 +21,14 @@ except ImportError:
 
 
 class SysLogger(object):
+    default_logtag = 'compress_agent'
 
-    def __init__(self, logger = None, logtag = 'compress_agent', log2tty = True):
-        self.__log = logger or logging.getLogger(logtag)
+    def __init__(self, logger = None, logtag = None, log2tty = True):
+        if not logtag:
+            self.__logtag = SysLogger.default_logtag
+        else:
+            self.__logtag = '%s-%s' % (SysLogger.default_logtag, logtag)
+        self.__log = logger or logging.getLogger(self.__logtag)
         self.__log.setLevel(logging.INFO)
         # str_format = '%(name)s: %(message)s'
         # logging.Formatter(str_format)
@@ -232,6 +237,7 @@ class CentralDB(object):
             return False
         else:
             self.log.debug('Session found in MongoDB: %s' % doc['unique_session_id'])
+            # self.log.info('Session found in MongoDB: %s' % doc['unique_session_id'])
 
         try:
             res = self.db.sessions.update(
@@ -245,6 +251,7 @@ class CentralDB(object):
             self.log.error('Session %s update returns empty result' % doc['unique_session_id'])
         else:
             self.log.debug('Session %s updated' % doc['unique_session_id'])
+            # self.log.info('Session %s updated' % doc['unique_session_id'])
 
         return True;
 
@@ -281,6 +288,29 @@ class Storage(object):
                 self.failed(stat)
         return True
 
+
+
+def worker(stat_burst):
+    proc = multiprocessing.current_process()
+    log = SysLogger(logtag = '[%s]' % str(proc.pid)) # logger = multiprocessing.log_to_stderr())
+    try:
+        log.getLogger().debug('Processing %s by %s...' % (stat_burst, proc.name))
+        storage = Storage(stat_burst, log.getLogger())
+        if storage.process():
+            try:
+                os.remove(stat_burst)
+            except OSError as e:
+                log.getLogger().error('Fail to remove storage file %s: %s' % (stat_burst, e))
+                log.getLogger().info('Successfully processed %s' % stat_burst)
+                return False
+    except Exception as e:
+        log.getLogger().error('Exception while processing %s: %s' % (stat_burst, e))
+        return False
+    except:
+        log.getLogger().error('Exception while processing %s: Uknown exception' % stat_burst)
+        return False
+    log.getLogger().info('Successfully processed %s' % stat_burst)
+    return True
 
 
 class Cmd(object):
@@ -324,11 +354,13 @@ class StatServer(object):
   @staticmethod
   def worker_init():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    SysLogger().getLogger().info('Starting %s' % multiprocessing.current_process().name)
+    proc = multiprocessing.current_process()
+    SysLogger().getLogger().info('Starting %s[%s]' % (proc.name, proc.pid))
 
 
   def __del__(self):
     try:
+        self.__pool.close()
         self.__pool.terminate()
         self.__pool.join()
         for name in self.results.keys():
@@ -359,25 +391,31 @@ class StatServer(object):
             try:
                 while(True):
                     stat_burst = self.sock.read()
-                    self.log.info('Got data file: "%s"' % stat_burst)
+                    self.log.info('Got data: "%s"' % stat_burst)
                     ###
                     try:
                         for name in self.results.keys():
                             if self.results[name].ready():
                                 if not self.results[name].get():
                                     try:
-                                        os.remove(name)
+                                        if os.path.isfile(name):
+                                            os.remove(name)
+                                        del self.results[name]
                                     except OSError as e:
-                                        self.log.error('Fail to remove storage file %s: %s' % (name, e))
+                                        pass
+                                        # self.log.error('Fail to remove storage file %s: %s' % (name, e))
                                 else:
                                     del self.results[name]
                     except:
                         pass
                     ###
                     if not self.__pool:
+                        # multiprocessing.log_to_stderr(logging.INFO)
+                        self.log.info('Init worker pool...')
                         self.__pool = multiprocessing.Pool(processes = multiprocessing.cpu_count(),
                                                            initializer = StatServer.worker_init)
                     self.results[stat_burst] = self.__pool.apply_async(worker, (stat_burst,))
+                    self.log.debug('Scheduled to handle %s' % stat_burst)
 
             except (KeyboardInterrupt, SystemExit):
                 raise KeyboardInterrupt
@@ -400,21 +438,6 @@ class StatServer(object):
     self.log.info('Canceled')
     sys.exit(0)
 
-
-
-def worker(stat_burst):
-    try:
-        log = SysLogger()
-        storage = Storage(stat_burst, log.getLogger())
-        if storage.process():
-            try:
-                os.remove(stat_burst)
-            except OSError as e:
-                log.getLogger().error('Fail to remove storage file %s: %s' % (stat_burst, e))
-                return False
-    except:
-        return False
-    return True
 
 
 
